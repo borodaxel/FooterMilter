@@ -10,14 +10,15 @@ Class-Path: .
  lib/commons-logging-1.2.jar 
  lib/ini4j-0.5.4.jar 
  lib/javax.inject.jar 
- lib/jmilter-0.3.6.jar 
+ lib/jmilter-0.6.jar 
  lib/jsr305-3.0.2.jar 
  lib/log4j-api-2.17.2.jar 
  lib/log4j-core-2.17.2.jar 
- lib/netty-buffer-4.1.76.Final.jar 
- lib/netty-codec-4.1.76.Final.jar 
- lib/netty-common-4.1.76.Final.jar 
- lib/netty-handler-4.1.76.Final.jar 
- lib/netty-transport-4.1.76.Final.jar 
- lib/yaranga-0.11.jar 
+ lib/netty-buffer-4.1.94.Final.jar 
+ lib/netty-codec-4.1.94.Final.jar 
+ lib/netty-common-4.1.94.Final.jar 
+ lib/netty-handler-4.1.94.Final.jar 
+ lib/netty-transport-4.1.94.Final.jar 
+ lib/netty-transport-native-unix-common-4.1.94.Final.jar 
+ lib/yaranga-0.11.5.jar 
 Main-Class: net.tachtler.jmilter.FooterMilter.FooterMilter 

@@ -5,14 +5,17 @@
  */
 package net.tachtler.jmilter.FooterMilter;
 
+import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
+
+import org.nightcode.milter.net.ServerFactory;
 
 import org.apache.commons.cli.ParseException;
 import org.nightcode.common.service.ServiceManager;
 import org.nightcode.milter.MilterHandler;
 import org.nightcode.milter.net.MilterGatewayManager;
-import org.nightcode.milter.util.Actions;
-import org.nightcode.milter.util.ProtocolSteps;
+import org.nightcode.milter.Actions;
+import org.nightcode.milter.ProtocolSteps;
 
 /*******************************************************************************
  * JMilter Server for connections from an MTA.
@@ -72,17 +75,19 @@ public class FooterMilter {
 		 */
 		if (argsBean.getInetAddress() != null && argsBean.getPort() != 0) {
 			
-			// Variables.
-			StringBuffer address = new StringBuffer();
-			String config = "";
+			StringBuffer addressStr = new StringBuffer();
 			
 			// Build listen address:port variable.
-			address.append(argsBean.getInetAddress().getHostAddress());
-			address.append(":");
-			address.append(argsBean.getPort());
+			addressStr.append(argsBean.getInetAddress().getHostAddress());
+			addressStr.append(":");
+			addressStr.append(argsBean.getPort());
+
+			String envAddress = System.getProperty("jmilter.address", addressStr.toString());
+			String[] addrParts = envAddress.split(":");
 			
 			// Generate configuration string.
-			config = System.getProperty("jmilter.address", address.toString());
+			InetSocketAddress address = new InetSocketAddress(addrParts[0], Integer.parseInt(addrParts[1]));
+			ServerFactory<InetSocketAddress> serverFactory = ServerFactory.tcpIpFactory(address);
 
 			// Indicates what changes will be made with the messages.
 			Actions milterActions = Actions.builder().replaceBody().addHeader().build();
@@ -93,14 +98,9 @@ public class FooterMilter {
 			// Create the JMilter handler.
 			MilterHandler milterHandler = new FooterMilterHandler(milterActions, milterProtocolSteps, argsBean);
 
-			MilterGatewayManager gatewayManager;
-			try {
-				gatewayManager = new MilterGatewayManager(config, milterHandler, ServiceManager.instance());
-				gatewayManager.start();
-			} catch (UnknownHostException e) {
-				e.printStackTrace();
-			}
-			
+			MilterGatewayManager<InetSocketAddress> gatewayManager;
+			gatewayManager = new MilterGatewayManager<>(serverFactory, milterHandler);
+			gatewayManager.bind();
 		}
 
 	}

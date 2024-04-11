@@ -7,7 +7,11 @@ package net.tachtler.jmilter.FooterMilter;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.Charset;
+
+import java.util.Base64;
 
 import org.apache.commons.codec.EncoderException;
 import org.apache.commons.codec.net.QuotedPrintableCodec;
@@ -22,7 +26,6 @@ import org.apache.logging.log4j.Logger;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.handler.codec.base64.Base64;
 
 /*******************************************************************************
  * JMilter Handler for handling connections from an MTA to add a footer.
@@ -56,10 +59,6 @@ public class FooterMilterUtilities {
 
 	private static Logger log = LogManager.getLogger();
 
-	private static StringBuffer stringBuffer = new StringBuffer();
-
-	private static String entityTextBody = null;
-
 	/**
 	 * Constructor.
 	 */
@@ -68,7 +67,7 @@ public class FooterMilterUtilities {
 	}
 
 	/**
-	 * Return a String including the content from the given entity with added
+	 * Write to output stream data including the content from the given entity with added
 	 * footer. The given entity should be from "Content-Type" - "text/plain".
 	 * 
 	 * If the given entity has the "Content-Disposition" - "attachment" do NOT
@@ -79,51 +78,86 @@ public class FooterMilterUtilities {
 	 * appending the footer String!
 	 * 
 	 * @param entity
+	 * @param bodyContent
 	 * @param footer
-	 * @return String
 	 */
-	public static String getTextContentWithFooter(Entity entity, String footer) throws FooterMilterException {
-		stringBuffer.delete(0, stringBuffer.length());
+	public static void getTextContentWithFooter(Entity entity, ByteArrayOutputStream bodyContent, String footer) throws FooterMilterException, IOException {
 
-		stringBuffer.append(FooterMilterUtilities.getTextBody(entity));
-		stringBuffer.append(System.lineSeparator());
+		// For encoded content we need to concat original body with footer first and then encode both
+		ByteArrayOutputStream textBody = new ByteArrayOutputStream();
 
+		String charset = entity.getCharset();
+
+		log.debug("*entity.getCharset()                    : " + charset);
 		log.debug("*entity.getDispositionType()            : " + entity.getDispositionType());
 		log.debug("*entity.getContentTransferEncoding()    : " + entity.getContentTransferEncoding());
 
+		// 0 - no transfer encoding
+		// 1 - base64
+		// 2 - quoted-printable
+		int messageType = 0;
+		boolean parseMessage = false;
+
 		if (null != entity.getDispositionType()) {
 			if (!entity.getDispositionType().equalsIgnoreCase("attachment")) {
-				if (null != entity.getContentTransferEncoding()) {
-					if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-						stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
-					} else {
-						stringBuffer.append(footer);
-					}
-				} else {
-					stringBuffer.append(footer);
-				}
+				parseMessage = true;
+			} else {
+				// Pass attachment without modifications
+				// However it may have content-transfer-encoding
+				FooterMilterUtilities.writeTextBody(entity, bodyContent, true);
 			}
 		} else {
+			parseMessage = true;
+		}
+
+		if (parseMessage) {
+			FooterMilterUtilities.writeTextBody(entity, textBody);
+			textBody.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+
 			if (null != entity.getContentTransferEncoding()) {
-				if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-					stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
+				if (entity.getContentTransferEncoding().equalsIgnoreCase("base64")) {
+					messageType = 1;
+				} else if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
+					messageType = 2;
 				} else {
-					stringBuffer.append(footer);
+					// just for reference messageType = 0;
 				}
 			} else {
-				stringBuffer.append(footer);
+				// just for reference messageType = 0;
+			}
+
+			switch (messageType) {
+			case 0: // Without transfer encoding
+				textBody.writeTo(bodyContent);
+				bodyContent.write(footer.getBytes(Charset.forName(charset)));
+				// Footer trailing EOF was trimmed
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+				break;
+			case 1: // Base64
+				textBody.write(footer.getBytes(Charset.forName(charset)));
+				bodyContent.write(Base64.getMimeEncoder().encode(textBody.toByteArray()));
+				// Close the last line of base64 data
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+				break;
+			case 2: // Quoted-printable
+				textBody.write(footer.getBytes(Charset.forName(charset)));
+				FooterMilterUtilities.writeQuotedPrintable(textBody.toByteArray(), bodyContent);
+				// Close the last line of quoted data
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+				break;
 			}
 		}
 
-		stringBuffer.append(System.lineSeparator());
+		// Extra line to split from message end
+		bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
 
-		log.debug("Content-Type: text/plain                : " + stringBuffer.toString());
+//		log.debug("Content-Type: text/plain                : " + stringBuffer.toString());
 
-		return stringBuffer.toString();
+		return;
 	}
 
 	/**
-	 * Return a String including the content from the given entity with added
+	 * Write to output stream data including the content from the given entity with added
 	 * footer. The given entity should be from "Content-Type" - "text/html".
 	 * 
 	 * Determine if the given "Content-Type" - "text/html" is correct formatted
@@ -138,130 +172,205 @@ public class FooterMilterUtilities {
 	 * appending the footer String!
 	 * 
 	 * @param entity
+	 * @param bodyContent
 	 * @param footer
-	 * @return String
 	 */
-	public static String getHtmlContentWithFooter(Entity entity, String footer) throws FooterMilterException {
-		stringBuffer.delete(0, stringBuffer.length());
-		entityTextBody = null;
+	public static void getHtmlContentWithFooter(Entity entity, ByteArrayOutputStream bodyContent, String footer) throws FooterMilterException, IOException {
 
+		String charset = entity.getCharset();
+		// Pre buffer with body, which may be encoded with base64 or quoted-printable
+		// In case of correct HTML we need another buffer to split the HTML document before closing body tag
+		ByteArrayOutputStream entityTextBody = new ByteArrayOutputStream();
+
+		log.debug("*entity.getCharset()                    : " + charset);
 		log.debug("*entity.getDispositionType()            : " + entity.getDispositionType());
 		log.debug("*entity.getContentTransferEncoding()    : " + entity.getContentTransferEncoding());
 
-		/*
-		 * Check if a well formed HTML content will be found. If it's true, customize
-		 * the well formed HTML content. If it's false, add the HTML content at the end
-		 * of the multipart part.
-		 */
-		entityTextBody = FooterMilterUtilities.getTextBody(entity);
+		// 0 - no tranfer encoding
+		// 1 - base64
+		// 2 - quoted-printable
+		int messageType = 0;
+		boolean parseMessage = false;
 
-		if (entityTextBody.indexOf("</body>") != -1) {
-			String[] splitString = entityTextBody.split("</body>");
-			stringBuffer.append(splitString[0].toString());
-
-			if (null != entity.getDispositionType()) {
-				if (!entity.getDispositionType().equalsIgnoreCase("attachment")) {
-					if (null != entity.getContentTransferEncoding()) {
-						if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-							stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
-						} else {
-							stringBuffer.append(footer);
-						}
-					} else {
-						stringBuffer.append(footer);
-					}
-				}
+		if (null != entity.getDispositionType()) {
+			if (!entity.getDispositionType().equalsIgnoreCase("attachment")) {
+				parseMessage = true;
 			} else {
-				if (null != entity.getContentTransferEncoding()) {
-					if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-						stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
-					} else {
-						stringBuffer.append(footer);
-					}
-				} else {
-					stringBuffer.append(footer);
-				}
+				// Pass attachment without modifications
+				// However it may have content-transfer-encoding
+				FooterMilterUtilities.writeTextBody(entity, bodyContent, true);
 			}
-
-			stringBuffer.append("</body>");
-			stringBuffer.append(splitString[1].toString());
-
 		} else {
-			stringBuffer.append(entityTextBody);
-
-			if (null != entity.getDispositionType()) {
-				if (!entity.getDispositionType().equalsIgnoreCase("attachment")) {
-					if (null != entity.getContentTransferEncoding()) {
-						if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-							stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
-						} else {
-							stringBuffer.append(footer);
-						}
-					} else {
-						stringBuffer.append(footer);
-					}
-				}
-			} else {
-				if (null != entity.getContentTransferEncoding()) {
-					if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-						stringBuffer.append(FooterMilterUtilities.createQuotedPrintable(footer));
-					} else {
-						stringBuffer.append(footer);
-					}
-				} else {
-					stringBuffer.append(footer);
-				}
-			}
+			parseMessage = true;
 		}
 
-		log.debug("Content-Type: text/html                 : " + stringBuffer.toString());
+		if (parseMessage) {
+			// Skip any processing if not true
+			if (null != entity.getContentTransferEncoding()) {
+				if (entity.getContentTransferEncoding().equalsIgnoreCase("base64")) {
+					messageType = 1;
+				} else if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
+					messageType = 2;
+				} else {
+					// just for reference messageType = 0;
+				}
+			} else {
+				// just for reference messageType = 0;
+			}
 
-		return stringBuffer.toString();
+			/*
+			 * Check if a well formed HTML content will be found. If it's true, customize
+			 * the well formed HTML content. If it's false, add the HTML content at the end
+			 * of the multipart part.
+			 */
+			// This should be unencrypted! But writeBody() func already encodes the body!
+			FooterMilterUtilities.writeTextBody(entity, entityTextBody);
+			// String to detect closing body tag
+			String origTextBody = entityTextBody.toString(charset);
+
+			if (origTextBody.indexOf("</body>") != -1) {
+				// HTML document with closing body tag
+				// Base64 and quoted-printable are totally different, we can't mix unencoded data with encoded
+				ByteArrayOutputStream htmlBody = new ByteArrayOutputStream();
+
+				String[] splitString = origTextBody.split("</body>");
+				htmlBody.write(splitString[0].getBytes(Charset.forName(charset)));
+				// Start new line before footer
+				htmlBody.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+
+				switch (messageType) {
+				case 0: // Without transfer encoding
+					// Dump HTML message before the </body> tag
+					htmlBody.writeTo(bodyContent);
+					// Write footer, for HTML we don't care about extra new line
+					bodyContent.write(footer.getBytes(Charset.forName(charset)));
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					// Close body tag
+					bodyContent.write("</body>".getBytes(StandardCharsets.US_ASCII));
+					// Append the rest of HTML
+					bodyContent.write(splitString[1].getBytes(Charset.forName(charset)));
+					break;
+				case 1: // Base64
+					// First part of HTML is already in output stream
+					// Append the footer
+					htmlBody.write(footer.getBytes(Charset.forName(charset)));
+					// Close body tag
+					htmlBody.write("</body>".getBytes(StandardCharsets.US_ASCII));
+					// Append the rest of HTML
+					htmlBody.write(splitString[1].getBytes(Charset.forName(charset)));
+					// Encode and write to the message
+					bodyContent.write(Base64.getMimeEncoder().encode(htmlBody.toByteArray()));
+					// Close the last line of base64 data
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					break;
+				case 2: // Quoted-printable
+					// The same as for base64
+					htmlBody.write(footer.getBytes(Charset.forName(charset)));
+					htmlBody.write("</body>".getBytes(StandardCharsets.US_ASCII));
+					htmlBody.write(splitString[1].getBytes(Charset.forName(charset)));
+					FooterMilterUtilities.writeQuotedPrintable(htmlBody.toByteArray(), bodyContent);
+					// Add line to split message parts, if any.
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					break;
+				}
+
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+			} else {
+				// HTML document with missing closing body tag
+				switch (messageType) {
+				case 0: // Without transfer encoding
+					entityTextBody.writeTo(bodyContent);
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					bodyContent.write(footer.getBytes(Charset.forName(charset)));
+					break;
+				case 1: // Base64
+					// Original body is already there
+					// Append the footer
+					entityTextBody.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					entityTextBody.write(footer.getBytes(Charset.forName(charset)));
+					// Encode and write to the message
+					bodyContent.write(Base64.getMimeEncoder().encode(entityTextBody.toByteArray()));
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					break;
+				case 2: // Quoted-printable
+					// The same as for base64
+					entityTextBody.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					entityTextBody.write(footer.getBytes(Charset.forName(charset)));
+					//
+					FooterMilterUtilities.writeQuotedPrintable(entityTextBody.toByteArray(), bodyContent);
+					// Add line to split message parts, if any.
+					bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+					break;
+				}
+			}
+
+			bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
+		}
+
+//		log.debug("Content-Type: text/html                 : " + stringBuffer.toString());
+
+		return;
 	}
 
 	/**
-	 * Return a String including the content from the given entity WITHOUT added
+	 * Write to output stream a data including the content from the given entity WITHOUT added
 	 * footer. The given entity could be from ANY "Content-Type", but should NOT be
 	 * from "Content-Type" - "text/plain" or "text/html".
 	 * 
 	 * @param entity
-	 * @return String
+	 * @param bodyContent
 	 */
-	public static String getBinaryContent(Entity entity) throws FooterMilterException {
-		stringBuffer.delete(0, stringBuffer.length());
+	public static void writeBinaryContent(Entity entity, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
 
-		stringBuffer.append(FooterMilterUtilities.getBinaryBody(entity));
-		stringBuffer.append(System.lineSeparator());
+		FooterMilterUtilities.writeBinaryBody(entity, bodyContent);
+		bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
 
-		log.debug("Content-Type: \"binary-content\"          : " + stringBuffer.toString());
+//		log.debug("Content-Type: \"binary-content\"          : " + stringBuffer.toString());
 
-		return stringBuffer.toString();
+		return;
 	}
 
 	/**
-	 * Return the bodyString String from given (TextBody) entity.
+	 * Write text body bytes from given (TextBody) entity to output stream.
 	 * 
 	 * @param entity
-	 * @return String
+	 * @param bodyContent
 	 */
-	public static String getTextBody(Entity entity) throws FooterMilterException {
-		TextBody textBody = (TextBody) entity.getBody();
-		return getBody(entity, textBody);
+	public static void writeTextBody(Entity entity, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
+		writeTextBody(entity, bodyContent, false);
 	}
 
 	/**
-	 * Return the bodyString String from given (BinaryBody) entity.
+	 * Write text body bytes from given (TextBody) entity to output stream.
 	 * 
-	 * @param part
-	 * @return String
+	 * @param entity
+	 * @param bodyContent
+	 * @param encode
 	 */
-	public static String getBinaryBody(Entity entity) throws FooterMilterException {
-		BinaryBody binaryBody = (BinaryBody) entity.getBody();
-		return getBody(entity, binaryBody);
+	public static void writeTextBody(Entity entity, ByteArrayOutputStream bodyContent, boolean encode) throws FooterMilterException, IOException {
+		TextBody textBody = (TextBody) entity.getBody();
+		if (encode) {
+			writeEncodedBody(entity, textBody, bodyContent);
+		} else {
+			writeBody(entity, textBody, bodyContent);
+		}
+		return;
 	}
 
 	/**
-	 * Return the bodyString String from given entity and body. Depending on the
+	 * Write the binary body content to output stream.
+	 * 
+	 * @param entity
+	 * @param bodyContent
+	 */
+	public static void writeBinaryBody(Entity entity, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
+		BinaryBody binaryBody = (BinaryBody) entity.getBody();
+		writeEncodedBody(entity, binaryBody, bodyContent);
+		return;
+	}
+
+	/**
+	 * Write encoded data from given entity and body to output stream. Depending on the
 	 * "Content-Transfer-Encoding" create the right body encoding.
 	 * 
 	 * If the "Content-Transfer-Encoding" is "base64" or "quoted-printable", not
@@ -271,60 +380,72 @@ public class FooterMilterUtilities {
 	 * 
 	 * @param entity
 	 * @param body
-	 * @return String
+	 * @param bodyContent
 	 */
-	private static String getBody(Entity entity, Body body) throws FooterMilterException {
-		String bodyString = null;
+	private static void writeEncodedBody(Entity entity, Body body, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
 		try {
 			InputStream inputStream = ((SingleBody) body).getInputStream();
+			// This is raw content with some charset!
 			byte[] bytes = IOUtils.toByteArray(inputStream);
 
 			if (entity.getContentTransferEncoding().equalsIgnoreCase("base64")) {
-				ByteBuf byteBuf = Unpooled.buffer(bytes.length);
-				byteBuf.writeBytes(bytes);
-				bodyString = Base64.encode(byteBuf, true).toString(StandardCharsets.UTF_8);
+				bodyContent.write(Base64.getMimeEncoder().encode(bytes));
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
 			} else if (entity.getContentTransferEncoding().equalsIgnoreCase("quoted-printable")) {
-				bodyString = createQuotedPrintable(new String(bytes));
+				writeQuotedPrintable(bytes, bodyContent);
+				// Add line to split message parts, if any.
+				bodyContent.write(System.lineSeparator().getBytes(StandardCharsets.US_ASCII));
 			} else {
-				bodyString = new String(bytes);
+				bodyContent.write(bytes);
 			}
 		} catch (IOException eIOException) {
 			throw new FooterMilterException(false, eIOException);
 		}
 
-		log.debug("*bodyString   <- (Start at next line) -> : " + System.lineSeparator() + bodyString);
+//		log.debug("*bodyString   <- (Start at next line) -> : " + System.lineSeparator() + bodyString);
 
-		return bodyString;
+		return;
+	}
+
+
+	/**
+	 * Write data from given entity and body to output stream as plain text.
+	 * Encoding is required in case of writeBinaryContent only.
+	 * The resulting encodind will be done in footer generation functions.
+	 * 
+	 * @param entity
+	 * @param body
+	 * @param bodyContent
+	 */
+	private static void writeBody(Entity entity, Body body, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
+		try {
+			InputStream inputStream = ((SingleBody) body).getInputStream();
+			// This is raw content with some charset!
+			IOUtils.copy(inputStream, bodyContent);
+		} catch (IOException eIOException) {
+			throw new FooterMilterException(false, eIOException);
+		}
+
+//		log.debug("*bodyString   <- (Start at next line) -> : " + System.lineSeparator() + bodyString);
+
+		return;
 	}
 
 	/**
-	 * Create a "Quoted Printable" from a String, using the MIME4J EncoderUtil and
-	 * return a coded String.
+	 * Write a "Quoted Printable" data from a byte array to output stream, using the Apache QuotedPrintableCodec.
 	 * 
 	 * @param string
 	 * @return String
 	 */
-	private static String createQuotedPrintable(String string) throws FooterMilterException {
-		StringBuffer quotedStringBuffer = new StringBuffer();
-		String[] stringLines = string.split(System.lineSeparator());
-		QuotedPrintableCodec quotedPrintableCodec = new QuotedPrintableCodec();
+	private static void writeQuotedPrintable(byte[] content, ByteArrayOutputStream bodyContent) throws FooterMilterException, IOException {
+		QuotedPrintableCodec quotedPrintableCodec = new QuotedPrintableCodec(true);
 
-		for (String line : stringLines) {
-			line = line.replaceAll("\\r|\\n", "");
+		bodyContent.write(quotedPrintableCodec.encode(content));
 
-			try {
-				quotedStringBuffer.append(quotedPrintableCodec.encode(line));
-				quotedStringBuffer.append(System.lineSeparator());
-			} catch (EncoderException eEncoderException) {
-				throw new FooterMilterException(false, eEncoderException);
-			}
+//		log.debug(
+//				"*quotedStringBuffer (Start at next line) : " + System.lineSeparator() + quotedStringBuffer.toString());
 
-		}
-
-		log.debug(
-				"*quotedStringBuffer (Start at next line) : " + System.lineSeparator() + quotedStringBuffer.toString());
-
-		return quotedStringBuffer.toString();
+		return;
 	}
 
 }
